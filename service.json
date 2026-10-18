@@ -1,0 +1,29 @@
+{
+  "name": "PowerSnap",
+  "version": "0.7.1",
+  "description": "X11 window zone snapping with Alt+Drag",
+  "type": "user-service",
+
+  "systemd": {
+    "unit": "systemd/powersnap.service",
+    "timer": null,
+    "service_name": "powersnap.service"
+  },
+
+  "network": {
+    "port": null,
+    "health": null
+  },
+
+  "paths": {
+    "config": "~/.config/powersnap/",
+    "logs": "journalctl",
+    "install": "install.sh",
+    "uninstall": "uninstall.sh"
+  },
+
+  "ui": {
+    "icon": "🎯",
+    "category": "Desktop"
+  }
+}

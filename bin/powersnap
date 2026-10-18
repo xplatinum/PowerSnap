@@ -1,0 +1,13 @@
+#!/bin/bash
+# PowerSnap Daemon Wrapper
+# This script locates the repository and runs the daemon with the correct environment
+
+# Resolve symlinks to find the actual script location (repo/bin/)
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+BIN_DIR="$(dirname "$SCRIPT_PATH")"
+REPO_DIR="$(dirname "$BIN_DIR")"
+
+# Activate virtual environment and run daemon
+source "$REPO_DIR/venv/bin/activate"
+export PYTHONPATH="$REPO_DIR/src:$PYTHONPATH"
+exec python3 -m power_snap.daemon "$@"

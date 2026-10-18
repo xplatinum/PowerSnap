@@ -1,0 +1,16 @@
+[Unit]
+Description=PowerSnap Window Snapping Daemon
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/powersnap
+Restart=on-failure
+RestartSec=5
+
+# X11 environment
+Environment=DISPLAY=:0
+
+[Install]
+WantedBy=graphical-session.target
