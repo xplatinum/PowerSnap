@@ -16,6 +16,7 @@ from .input_monitor import KeyboardTracker, MouseTracker
 from .layout_library import LayoutLibrary
 from .settings import load_gap_px
 from .tile_geometry import inset_rectangle
+from .display_geometry import current_root_size
 from Xlib import X, display as xdisplay
 
 
@@ -69,6 +70,9 @@ class WindowSnapper:
             '~/.config/powersnap/.layout-reflow-request')
         self._last_reflow_token = self._read_reflow_token()
         self._last_layout_zones = {}
+        # Detect runtime XRandR changes. Stored zones are normalized, so the
+        # same layout can be projected into the new pixel dimensions.
+        self._last_root_size = current_root_size(self.window_manager.root)
 
     def _read_reflow_token(self):
         try:
@@ -113,6 +117,18 @@ class WindowSnapper:
         gap = load_gap_px()
         now = time.monotonic()
         workspace = self.get_current_workspace()
+        # Query the live root rectangle, not Display.screen()'s cached mode.
+        # A resolution change invalidates every previously applied snap even
+        # if the gap value and normalized zone coordinates are unchanged.
+        root_size = current_root_size(self.window_manager.root)
+        resolution_changed = root_size != self._last_root_size
+        if resolution_changed:
+            print(f"[Display] Resolution changed: {self._last_root_size} -> {root_size}; reflow queued", flush=True)
+            self._last_root_size = root_size
+            self._gap_frame_checks.clear()
+            self._next_gap_reflow_time = 0.0
+            for wid in self._snapped_assignments:
+                self._applied_gap_by_window.pop(wid, None)
         token = self._read_reflow_token()
         request_changed = token != self._last_reflow_token
         self._last_reflow_token = token
@@ -213,9 +229,9 @@ class WindowSnapper:
             zone = next((z for z in zones if self._zone_key(z) == key), None)
             if zone is None:
                 continue
-            screen = self.window_manager.display.screen()
-            visible = inset_rectangle(zone, zones, screen.width_in_pixels,
-                                       screen.height_in_pixels, gap)
+            screen_width, screen_height = current_root_size(self.window_manager.root)
+            visible = inset_rectangle(zone, zones, screen_width,
+                                       screen_height, gap)
             base = self._zone_target_geometry(wid, zone)
             # Do not call manual snap; it uses StaticGravity, which anchors
             # decorated clients rather than their outer xfwm4 frames.
@@ -233,11 +249,11 @@ class WindowSnapper:
 
     def _zone_target_geometry(self, window_id: int, zone: Zone) -> Tuple[int, int, int, int]:
         """Convert the inset visible zone rectangle to a client resize target."""
-        screen = self.window_manager.display.screen()
+        screen_width, screen_height = current_root_size(self.window_manager.root)
         layout = self.layout_library.get_workspace_layout(self.get_current_workspace())
         peers = layout.zones if layout else [zone]
-        visible_rect = inset_rectangle(zone, peers, screen.width_in_pixels,
-                                       screen.height_in_pixels, load_gap_px())
+        visible_rect = inset_rectangle(zone, peers, screen_width,
+                                       screen_height, load_gap_px())
         return self.window_manager.zone_to_client_geometry(window_id, visible_rect)
 
     def snap_window_to_zone(self, window_id: int, zone: Zone, animate: bool = False) -> bool:
@@ -323,9 +339,9 @@ class WindowSnapper:
                 y = round(py - max(0, min(32, py - cy)))
             else:
                 x, y = cx, cy
-            screen = self.window_manager.display.screen()
-            x = max(0, min(x, max(0, screen.width_in_pixels - min(w, 100))))
-            y = max(0, min(y, max(0, screen.height_in_pixels - 50)))
+            screen_width, screen_height = current_root_size(self.window_manager.root)
+            x = max(0, min(x, max(0, screen_width - min(w, 100))))
+            y = max(0, min(y, max(0, screen_height - 50)))
         success = self.window_manager.move_resize_window(window_id, x, y, w, h)
         return success
 

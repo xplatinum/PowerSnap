@@ -66,3 +66,18 @@ cp -an ~/.config/snapzones/. ~/.config/powersnap/ 2>/dev/null || true
 ```
 
 Remove old symlinks or the old service unit **only after** the new PowerSnap installation has been tested. Your original `~/.config/snapzones` files remain untouched.
+
+### Display resolution changes
+
+Zone rectangles are stored as normalized fractions of the X11 desktop. PowerSnap
+reads the **current** X11 root size whenever it calculates snapping geometry,
+so layouts scale when you change resolution. The daemon also detects an XRandR
+mode change and reflows windows already assigned to zones, without changing
+the saved layout. The configured gap remains a fixed number of pixels.
+
+This version scales layouts across the entire X11 desktop, not separately per
+physical monitor. Panel/work-area offsets saved in older layouts are still
+represented as fractions of the original screen, so a panel's pixel offset may
+not remain exactly constant after a substantial resolution change. For a
+multi-monitor layout, monitor-relative coordinates would require a separate
+future change.

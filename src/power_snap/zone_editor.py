@@ -44,6 +44,7 @@ from .zone import Zone, create_preset_layout
 from .layout_library import LayoutLibrary, Layout
 from .settings import load_gap_px, save_gap_px
 from .tile_geometry import inset_rectangle
+from .display_geometry import current_root_size
 
 
 class ZoneEditorOverlay(Gtk.Window):
@@ -73,6 +74,7 @@ class ZoneEditorOverlay(Gtk.Window):
 
         # Get work area (usable screen space excluding panels/docks)
         self.workarea_margins = self._get_workarea_margins()
+        self._known_root_size = current_root_size(self.x_display.screen().root)
 
         # Will be set after workspace detection
         self.current_layout_name: Optional[str] = initial_layout
@@ -152,6 +154,8 @@ class ZoneEditorOverlay(Gtk.Window):
         self.connect("motion-notify-event", self.on_motion)
         self.connect("key-press-event", self.on_key_press)
         self.connect("destroy", Gtk.main_quit)
+        # Fullscreen allocation can change after XRandR mode switches.
+        self.connect("size-allocate", self._on_display_allocation_changed)
 
         self.set_events(
             Gdk.EventMask.BUTTON_PRESS_MASK |
@@ -159,6 +163,14 @@ class ZoneEditorOverlay(Gtk.Window):
             Gdk.EventMask.POINTER_MOTION_MASK |
             Gdk.EventMask.KEY_PRESS_MASK
         )
+
+    def _on_display_allocation_changed(self, widget, allocation):
+        """Refresh panel margins and redraw proportional zones on mode switch."""
+        size = current_root_size(self.x_display.screen().root)
+        if size != self._known_root_size:
+            self._known_root_size = size
+            self.workarea_margins = self._get_workarea_margins()
+            self.queue_draw()
 
     def _get_workarea_margins(self) -> Tuple[int, int, int, int]:
         """
@@ -169,8 +181,7 @@ class ZoneEditorOverlay(Gtk.Window):
         """
         try:
             root = self.x_display.screen().root
-            screen_width = self.x_display.screen().width_in_pixels
-            screen_height = self.x_display.screen().height_in_pixels
+            screen_width, screen_height = current_root_size(root)
 
             # Get _NET_WORKAREA property
             net_workarea = self.x_display.intern_atom('_NET_WORKAREA')
