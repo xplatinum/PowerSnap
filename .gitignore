@@ -15,3 +15,6 @@ dist/
 *.backup*
 *~
 .DS_Store
+
+# Local testing / development only (not part of published Arch-only project)
+tests/

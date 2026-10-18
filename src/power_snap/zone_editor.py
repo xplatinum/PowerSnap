@@ -42,6 +42,7 @@ import time
 from typing import List, Optional, Tuple
 from .zone import Zone, create_preset_layout
 from .layout_library import LayoutLibrary, Layout
+from .layout_transfer import export_layouts, import_layouts
 from .settings import load_gap_px, save_gap_px
 from .tile_geometry import inset_rectangle
 from .display_geometry import current_root_size
@@ -1382,12 +1383,84 @@ class ZoneEditorOverlay(Gtk.Window):
         delete_btn.connect("clicked", lambda btn: self._on_delete_layout())
         button_box.pack_start(delete_btn, True, True, 0)
 
+        # Portable layout backup and migration (workspace assignments are local).
+        transfer_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
+        export_button = Gtk.Button(label="Export Layouts…")
+        export_button.set_tooltip_text("Save all layouts to a portable JSON file")
+        export_button.connect("clicked", self._on_export_layouts)
+        transfer_row.pack_start(export_button, True, True, 0)
+        import_button = Gtk.Button(label="Import Layouts…")
+        import_button.set_tooltip_text("Import layouts; existing names are preserved")
+        import_button.connect("clicked", self._on_import_layouts)
+        transfer_row.pack_start(import_button, True, True, 0)
+        vbox.pack_start(transfer_row, False, False, 0)
+
         # Close button (exits entire editor)
         close_btn = Gtk.Button(label="Close Editor")
         close_btn.connect("clicked", lambda btn: Gtk.main_quit())
         vbox.pack_start(close_btn, False, False, 5)
 
         window.show_all()
+
+    def _layout_transfer_dialog(self, title, message_type, message):
+        dialog = Gtk.MessageDialog(
+            transient_for=self.layout_manager_window,
+            flags=Gtk.DialogFlags.MODAL,
+            message_type=message_type,
+            buttons=Gtk.ButtonsType.OK,
+            text=title,
+        )
+        dialog.format_secondary_text(message)
+        dialog.run()
+        dialog.destroy()
+
+    def _on_export_layouts(self, button):
+        dialog = Gtk.FileChooserDialog(
+            title="Export PowerSnap Layouts",
+            transient_for=self.layout_manager_window,
+            action=Gtk.FileChooserAction.SAVE,
+        )
+        dialog.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+                           Gtk.STOCK_SAVE, Gtk.ResponseType.OK)
+        dialog.set_do_overwrite_confirmation(True)
+        dialog.set_current_name("powersnap-layouts.json")
+        result = dialog.run()
+        path = dialog.get_filename() if result == Gtk.ResponseType.OK else None
+        dialog.destroy()
+        if path:
+            try:
+                count = export_layouts(self.layout_library, path)
+                self._layout_transfer_dialog("Export complete", Gtk.MessageType.INFO,
+                                             f"Exported {count} layout(s) to:\n{path}")
+            except (ValueError, OSError, TypeError) as exc:
+                self._layout_transfer_dialog("Export failed", Gtk.MessageType.ERROR, str(exc))
+
+    def _on_import_layouts(self, button):
+        dialog = Gtk.FileChooserDialog(
+            title="Import PowerSnap Layouts",
+            transient_for=self.layout_manager_window,
+            action=Gtk.FileChooserAction.OPEN,
+        )
+        dialog.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+                           Gtk.STOCK_OPEN, Gtk.ResponseType.OK)
+        file_filter = Gtk.FileFilter()
+        file_filter.set_name("PowerSnap JSON layouts (*.json)")
+        file_filter.add_pattern("*.json")
+        dialog.add_filter(file_filter)
+        result = dialog.run()
+        path = dialog.get_filename() if result == Gtk.ResponseType.OK else None
+        dialog.destroy()
+        if path:
+            try:
+                count, renamed = import_layouts(self.layout_library, path)
+                self._refresh_layout_manager()
+                self._layout_transfer_dialog(
+                    "Import complete", Gtk.MessageType.INFO,
+                    f"Imported {count} layout(s). {renamed} renamed to avoid overwriting existing layouts.\n"
+                    "Double-click an imported layout to activate it."
+                )
+            except (ValueError, OSError, UnicodeError, json.JSONDecodeError, TypeError) as exc:
+                self._layout_transfer_dialog("Import failed", Gtk.MessageType.ERROR, str(exc))
 
     def _refresh_layout_list(self):
         """Refresh the layout list in the manager window"""

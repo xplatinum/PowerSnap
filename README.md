@@ -24,7 +24,7 @@ bash install.sh
 systemctl --user enable --now powersnap.service
 ```
 
-The installer installs system packages through `pacman`, creates a Python virtual environment with access to those packages, links launchers into `~/.local/bin`, and registers a desktop editor shortcut where possible. Interactive installation can help adjust XFCE's Alt+drag window-manager conflict; alternatively:
+The installer installs system packages through `pacman`, creates a Python virtual environment with access to those packages, installs the application independently into `~/.local/share/powersnap/` and links launchers into `~/.local/bin`, and registers a desktop editor shortcut where possible. Interactive installation can help adjust XFCE's Alt+drag window-manager conflict; alternatively:
 
 ```bash
 xfconf-query -c xfwm4 -p /general/easy_click -s Super
@@ -41,15 +41,34 @@ journalctl --user -u powersnap -f
 powersnap-editor
 ```
 
-Configuration and layouts are stored in `~/.config/powersnap/`; they are not part of this repository. The installation uses symlinks pointing to this project, so keep the folder in place.
+Configuration and layouts are stored in `~/.config/powersnap/`; they are not part of this repository. The installed copy lives at `~/.local/share/powersnap/`. Launchers in `~/.local/bin/` point to this installed copy, not the source checkout. The service and icon are copied. You may move or delete the Downloads/source directory after installation. Re-run `bash install.sh -y` from a fresh checkout to update the installed application.
 
-## Test
+## Standalone installation and removal
+
+Installation copies the required `src/`, `bin/`, and `assets/` files into
+`~/.local/share/powersnap/`, creates the Python virtual environment there,
+and installs a regular systemd user service file. User settings and layouts
+remain in `~/.config/powersnap/` and are preserved during upgrades.
+
+The commands in `~/.local/bin/` are symlinks **to the installed copy** (not to
+this Git checkout). Removing the checkout after installation is safe.
+
+To update, download or clone a newer release and run its `bash install.sh -y`.
+The installer stops a running PowerSnap daemon before copying files and then
+restarts it. In unattended mode a fresh install does not automatically enable
+or start the service; run `systemctl --user enable --now powersnap.service`
+after your desktop session starts.
+
+To remove PowerSnap while retaining your layouts:
 
 ```bash
-PYTHONPATH=src python -m unittest discover -s tests -v
+bash uninstall.sh -y
 ```
 
-These tests check zone geometry without a running GUI. Snapping itself requires manual testing under XFCE/X11.
+Or use `~/.local/share/powersnap/uninstall.sh` after deleting the checkout.
+Interactive uninstallation offers to remove layouts and settings as well.
+GNOME shortcut removal is left to the user; XFCE's registered shortcut is
+removed only when it points to PowerSnap.
 
 ## License and attribution
 
@@ -81,3 +100,24 @@ represented as fractions of the original screen, so a panel's pixel offset may
 not remain exactly constant after a substantial resolution change. For a
 multi-monitor layout, monitor-relative coordinates would require a separate
 future change.
+
+### Firefox Picture-in-Picture on XFCE/X11
+
+PowerSnap recognizes Firefox-family Picture-in-Picture windows by their X11
+window role/title and class. PiP may use the dialog window type and may not
+become the focused window during Alt+Drag, so PowerSnap can select the PiP
+client under the pointer instead. This exception does not enable snapping of
+ordinary dialogs or desktop panels. Some video players enforce their aspect
+ratio or size hints, in which case the window manager may not honor the exact
+zone dimensions.
+
+### Exporting and importing layouts
+
+Open the PowerSnap zone editor (`Super+Shift+Tab`) and use **Export Layouts…**
+from Layout Manager to save all named layouts in a portable JSON file. Use
+**Import Layouts…** on the same or another machine to restore them. When an
+imported name already exists, PowerSnap creates a distinct ` (imported N)`
+name rather than overwriting an existing layout. After import, double-click
+the desired layout to activate it. Zone geometry, labels and colors are
+preserved. Per-workspace layout assignments and application settings (including
+window gap) are intentionally not part of the export.

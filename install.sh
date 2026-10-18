@@ -1,178 +1,125 @@
-#!/bin/bash
-# PowerSnap Installation Script (Arch Linux / pacman)
+#!/usr/bin/env bash
+# PowerSnap installer for Arch Linux/XFCE. Installs a standalone user copy.
+set -euo pipefail
 
-set -e
-
-# Parse arguments
 NON_INTERACTIVE=false
-if [[ "$1" == "-y" ]] || [[ "$1" == "--yes" ]]; then
-    NON_INTERACTIVE=true
+for arg in "$@"; do
+    case "$arg" in
+        -y|--yes) NON_INTERACTIVE=true ;;
+        *) echo "Unknown argument: $arg" >&2; exit 2 ;;
+    esac
+done
+
+if [[ $EUID -eq 0 ]]; then
+    echo "Run this as your normal desktop user, not with sudo." >&2
+    exit 1
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INSTALL_DIR="$HOME/.local/share/powersnap"
 BIN_DIR="$HOME/.local/bin"
 SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
 ICONS_DIR="$HOME/.local/share/icons"
+CONFIG_DIR="$HOME/.config/powersnap"
 
-echo "========================================="
-echo "PowerSnap Installation"
-echo "========================================="
-echo ""
-
-# Warn before starting a renamed service alongside the old daemon.
-if systemctl --user is-active --quiet snapzones.service 2>/dev/null; then
-    echo "WARNING: Previous SnapZones service is running."
-    echo "Stop it before starting PowerSnap: systemctl --user disable --now snapzones.service"
-fi
-
-# Check if running on X11
-if [ -z "$DISPLAY" ]; then
-    echo "ERROR: DISPLAY variable not set. PowerSnap requires X11."
-    exit 1
-fi
-
-if [ "$XDG_SESSION_TYPE" = "wayland" ]; then
-    echo "WARNING: Wayland detected. PowerSnap requires X11 to function properly."
-    echo "Please log out and select an X11 session instead."
-    if [ "$NON_INTERACTIVE" = false ]; then
-        read -p "Continue anyway? (y/N) " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            exit 1
-        fi
-    else
-        echo "Running in non-interactive mode - continuing anyway"
+for path in "$SCRIPT_DIR/src/power_snap" "$SCRIPT_DIR/bin/powersnap" "$SCRIPT_DIR/bin/powersnap-editor" "$SCRIPT_DIR/systemd/powersnap.service" "$SCRIPT_DIR/assets/icon.png" "$SCRIPT_DIR/requirements.txt"; do
+    if [[ ! -e "$path" ]]; then
+        echo "ERROR: required project file missing: $path" >&2
+        exit 1
     fi
+done
+if [[ -z ${DISPLAY:-} || ${XDG_SESSION_TYPE:-} == wayland ]]; then
+    echo "ERROR: Run from an X11 graphical session (DISPLAY required)." >&2
+    exit 1
 fi
-
-# Check for Arch Linux system dependencies
 if ! command -v pacman >/dev/null 2>&1; then
-    echo "ERROR: pacman not found. This installer targets Arch Linux."
+    echo "ERROR: pacman is required (Arch Linux)." >&2
     exit 1
 fi
 
-echo "Checking system dependencies..."
-# GTK 3 and PyGObject are supplied by pacman. python-xlib is also
-# provided as a native Arch package. pkgconf and cairo are useful for
-# Python extension builds if requirements.txt needs them.
+printf 'Installing PowerSnap to %s\n' "$INSTALL_DIR"
+if systemctl --user is-active --quiet snapzones.service 2>/dev/null; then
+    echo "WARNING: Legacy SnapZones daemon is active; disable it before running both."
+fi
+
 SYSTEM_DEPS=(python python-pip python-gobject python-cairo python-xlib python-evdev gtk3 cairo libx11 pkgconf gobject-introspection base-devel)
-# xfconf provides xfconf-query, which XFCE uses for application shortcuts.
-if [[ "${XDG_CURRENT_DESKTOP:-}" == *XFCE* || "${XDG_CURRENT_DESKTOP:-}" == *Xfce* || "${DESKTOP_SESSION:-}" == *xfce* ]]; then
+if [[ ${XDG_CURRENT_DESKTOP:-} == *XFCE* || ${XDG_CURRENT_DESKTOP:-} == *Xfce* || ${DESKTOP_SESSION:-} == *xfce* ]]; then
     SYSTEM_DEPS+=(xfconf)
 fi
 MISSING_DEPS=()
 for pkg in "${SYSTEM_DEPS[@]}"; do
-    if ! pacman -Q "$pkg" >/dev/null 2>&1; then
-        MISSING_DEPS+=("$pkg")
-    fi
+    pacman -Q "$pkg" >/dev/null 2>&1 || MISSING_DEPS+=("$pkg")
 done
-
 if (( ${#MISSING_DEPS[@]} > 0 )); then
-    echo "Missing system packages: ${MISSING_DEPS[*]}"
-    echo "Install with: sudo pacman -S --needed ${MISSING_DEPS[*]}"
-    if [ "$NON_INTERACTIVE" = true ]; then
-        sudo pacman -S --needed --noconfirm "${MISSING_DEPS[@]}"
+    printf 'Missing packages: %s\n' "${MISSING_DEPS[*]}"
+    if [[ $NON_INTERACTIVE == false ]]; then
+        read -r -p "Install missing packages with pacman? (y/N) " answer
+        [[ $answer =~ ^[Yy]$ ]] || exit 1
+        sudo pacman -S --needed "${MISSING_DEPS[@]}"
     else
-        read -r -p "Install now? (y/N) " REPLY
-        if [[ "$REPLY" =~ ^[Yy]$ ]]; then
-            sudo pacman -S --needed "${MISSING_DEPS[@]}"
-        else
-            echo "Please install missing dependencies and run this script again."
-            exit 1
-        fi
+        sudo pacman -S --needed --noconfirm "${MISSING_DEPS[@]}"
     fi
 fi
 
-echo "✓ System dependencies satisfied"
-echo ""
+# Install/update the application independently of the checkout. In particular,
+# never copy a development venv, .git directory, or user configuration.
+mkdir -p "$INSTALL_DIR" "$BIN_DIR" "$SYSTEMD_USER_DIR" "$ICONS_DIR" "$CONFIG_DIR/layouts"
+if [[ "$(realpath -m "$SCRIPT_DIR")" == "$(realpath -m "$INSTALL_DIR")" ]]; then
+    echo "ERROR: run installer from the source checkout, not from the installed application." >&2
+    exit 1
+fi
 
-# Install Python dependencies
-echo "Installing Python dependencies..."
-cd "$SCRIPT_DIR"
+# Shut down the previous process before replacing application files.
+was_active=false
+if systemctl --user is-active --quiet powersnap.service 2>/dev/null; then
+    was_active=true
+    systemctl --user stop powersnap.service
+fi
+cp -a "$SCRIPT_DIR/src" "$SCRIPT_DIR/bin" "$SCRIPT_DIR/assets" "$INSTALL_DIR/"
+cp -a "$SCRIPT_DIR/requirements.txt" "$INSTALL_DIR/requirements.txt"
+for optional in README.md LICENSE uninstall.sh; do
+    [[ ! -f "$SCRIPT_DIR/$optional" ]] || cp -a "$SCRIPT_DIR/$optional" "$INSTALL_DIR/$optional"
+done
 
-# Use --system-site-packages so the venv can access pacman-installed
-# gi (PyGObject), cairo and Xlib modules. Re-running also updates an
-# existing venv's pyvenv.cfg without clearing installed packages.
-echo "Creating/updating virtual environment (with Arch system packages)..."
-python -m venv --system-site-packages venv
-
-source venv/bin/activate
-
-# Arch provides GTK Python bindings as binary pacman packages. Installing
-# PyGObject/pycairo through pip can try compiling incompatible versions.
-# Ensure this venv can import the system-provided bindings first.
-if ! python - <<'PY_CHECK_IMPORTS'
+# Bindings built and managed by Arch must not be rebuilt by pip.
+python -m venv --system-site-packages "$INSTALL_DIR/venv"
+"$INSTALL_DIR/venv/bin/python" - <<'PY_IMPORTS'
 import gi
 import cairo
 import Xlib
 import evdev
-PY_CHECK_IMPORTS
-then
-    echo "ERROR: Cannot import Arch's Python GTK/Xlib bindings inside the venv."
-    echo "Check that python-gobject, python-cairo, and python-xlib are installed."
-    echo "Try removing the project's venv and rerunning this installer."
-    exit 1
-fi
+PY_IMPORTS
 
-# Exclude dependencies already installed through pacman from pip requirements.
-# Keep requirements.txt unchanged in the project directory.
-FILTERED_REQUIREMENTS="$SCRIPT_DIR/venv/requirements-arch.txt"
-python - "$SCRIPT_DIR/requirements.txt" "$FILTERED_REQUIREMENTS" <<'PY_FILTER_REQS'
+"$INSTALL_DIR/venv/bin/python" - "$INSTALL_DIR/requirements.txt" "$INSTALL_DIR/venv/requirements-arch.txt" <<'PY_REQ'
 import re
 import sys
 from pathlib import Path
-
-source = Path(sys.argv[1])
-dest = Path(sys.argv[2])
-arch_provided = {"pygobject", "pycairo", "python-xlib", "evdev"}
-filtered = []
+source, dest = map(Path, sys.argv[1:])
+provided = {"pygobject", "pycairo", "python-xlib", "evdev"}
+lines = []
 for line in source.read_text().splitlines(keepends=True):
     entry = line.strip()
     match = re.match(r"^([A-Za-z0-9_.-]+)(?=\s|[<>=!~;\[]|$)", entry)
-    if match and re.sub(r"[-_.]+", "-", match.group(1)).lower() in arch_provided:
-        print(f"Using pacman package instead of pip: {entry}")
-    else:
-        filtered.append(line)
-dest.write_text("".join(filtered))
-PY_FILTER_REQS
+    if match and re.sub(r"[-_.]+", "-", match.group(1)).lower() in provided:
+        continue
+    lines.append(line)
+dest.write_text("".join(lines))
+PY_REQ
+"$INSTALL_DIR/venv/bin/python" -m pip install -q -r "$INSTALL_DIR/venv/requirements-arch.txt"
+"$INSTALL_DIR/venv/bin/python" - <<'PY_VERIFY'
+import gi, cairo, Xlib, evdev, pynput
+PY_VERIFY
 
-python -m pip install -q -r "$FILTERED_REQUIREMENTS"
-
-echo "✓ Python dependencies installed"
-echo ""
-
-# Create installation directories
-echo "Setting up installation directories..."
-mkdir -p "$BIN_DIR"
-mkdir -p "$SYSTEMD_USER_DIR"
-mkdir -p "$ICONS_DIR"
-mkdir -p "$HOME/.config/powersnap/layouts"
-
-echo "✓ Directories created"
-echo ""
-
-# Symlink icon
-echo "Installing icon..."
-ln -sf "$SCRIPT_DIR/assets/icon.png" "$ICONS_DIR/powersnap.png"
-echo "✓ Icon symlinked to $ICONS_DIR/"
-echo ""
-
-# Symlink wrapper scripts
-echo "Installing PowerSnap scripts..."
-ln -sf "$SCRIPT_DIR/bin/powersnap" "$BIN_DIR/powersnap"
-ln -sf "$SCRIPT_DIR/bin/powersnap-editor" "$BIN_DIR/powersnap-editor"
-echo "✓ Scripts symlinked to $BIN_DIR/"
-echo ""
-
-# Symlink systemd user service
-echo "Installing systemd user service..."
-ln -sf "$SCRIPT_DIR/systemd/powersnap.service" "$SYSTEMD_USER_DIR/powersnap.service"
+# Symlinks target the installed copy, NEVER the source checkout.
+ln -sfn "$INSTALL_DIR/bin/powersnap" "$BIN_DIR/powersnap"
+ln -sfn "$INSTALL_DIR/bin/powersnap-editor" "$BIN_DIR/powersnap-editor"
+# Service and icon are regular files, not symlinks to the checkout.
+# Remove legacy symlinks before copying: cp onto a symlink would otherwise
+# overwrite its target and leave the source-checkout dependency intact.
+rm -f -- "$SYSTEMD_USER_DIR/powersnap.service" "$ICONS_DIR/powersnap.png"
+cp -f "$SCRIPT_DIR/systemd/powersnap.service" "$SYSTEMD_USER_DIR/powersnap.service"
+cp -f "$INSTALL_DIR/assets/icon.png" "$ICONS_DIR/powersnap.png"
 systemctl --user daemon-reload
-echo "✓ Systemd service installed"
-echo ""
-
-# Register native GNOME keyboard shortcut for editor
-echo "Registering keyboard shortcut (Super+Shift+Tab)..."
 
 register_gnome_shortcut() {
     local name="PowerSnap Editor"
@@ -300,18 +247,11 @@ fi
 
 echo ""
 
-# Check if ~/.local/bin is in PATH
-if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
-    echo "WARNING: $HOME/.local/bin is not in your PATH"
-    echo "Add this line to your ~/.bashrc or ~/.zshrc:"
-    echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
-    echo ""
+if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
+    printf 'NOTE: Add %s to PATH if commands are not found.\n' "$BIN_DIR"
 fi
-
-# Create default layout if none exists
-if [ ! -f "$HOME/.config/powersnap/layouts/default.json" ]; then
-    echo "Creating default layout..."
-    cat > "$HOME/.config/powersnap/layouts/default.json" << 'EOF'
+if [[ ! -f "$CONFIG_DIR/layouts/default.json" ]]; then
+    cat > "$CONFIG_DIR/layouts/default.json" <<'JSON'
 {
   "name": "default",
   "description": "Default empty layout",
@@ -319,49 +259,21 @@ if [ ! -f "$HOME/.config/powersnap/layouts/default.json" ]; then
   "created": "2025-10-08",
   "modified": "2025-10-08"
 }
-EOF
-    echo "✓ Default layout created"
-    echo ""
+JSON
 fi
 
-echo "========================================="
-echo "Installation Complete!"
-echo "========================================="
-echo ""
-echo "PowerSnap has been installed successfully."
-echo ""
-echo "Usage:"
-echo "  systemctl --user start powersnap   - Start daemon"
-echo "  systemctl --user stop powersnap    - Stop daemon"
-echo "  systemctl --user restart powersnap - Restart daemon"
-echo "  systemctl --user status powersnap  - Check status"
-echo "  journalctl --user -u powersnap     - View logs"
-echo "  powersnap-editor                   - Open zone editor"
-echo ""
-echo "Default shortcuts:"
-echo "  Alt + Drag Window      - Show zone overlay and snap"
-echo "  Super+Shift+Tab        - Open zone editor"
-echo ""
-
-if [ "$NON_INTERACTIVE" = false ]; then
-    read -p "Enable and start PowerSnap daemon now? (Y/n) " -n 1 -r
-    echo
-    START_DAEMON=$REPLY
+if [[ $NON_INTERACTIVE == true ]]; then
+    # If an existing daemon was running, resume it after the upgrade.
+    if [[ $was_active == true ]]; then
+        systemctl --user start powersnap.service
+    fi
+    echo "Installed. To enable: systemctl --user enable --now powersnap.service"
 else
-    START_DAEMON="n"
+    read -r -p "Enable and start PowerSnap now? (Y/n) " answer
+    if [[ ! $answer =~ ^[Nn]$ ]]; then
+        systemctl --user enable --now powersnap.service
+    elif [[ $was_active == true ]]; then
+        systemctl --user start powersnap.service
+    fi
 fi
-
-if [[ ! $START_DAEMON =~ ^[Nn]$ ]]; then
-    echo "Enabling and starting daemon..."
-    systemctl --user enable powersnap.service
-    systemctl --user start powersnap.service
-    echo ""
-    systemctl --user status powersnap.service --no-pager
-    echo ""
-    echo "Press Super+Shift+Tab to open the zone editor and create your first layout!"
-else
-    echo "Run 'systemctl --user enable --now powersnap' to start the daemon."
-fi
-
-echo ""
-echo "Enjoy PowerSnap!"
+printf 'PowerSnap installed in %s. Settings preserved at %s.\n' "$INSTALL_DIR" "$CONFIG_DIR"

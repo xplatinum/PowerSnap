@@ -6,6 +6,20 @@ from Xlib import X, display, protocol
 from Xlib.error import XError
 
 
+def is_firefox_pip_identity(role: str, title: str, wm_class: str) -> bool:
+    """Recognize Firefox-family PiP without admitting arbitrary dialogs.
+
+    Mozilla uses Toolkit:PictureInPicture as the X11 WM_WINDOW_ROLE for the
+    floating video player; the visible title can vary by translation.
+    """
+    role = (role or '').lower().replace('-', '').replace('_', '')
+    title = (title or '').lower().replace('-', '').replace('_', '')
+    wm_class = (wm_class or '').lower()
+    firefox_family = any(name in wm_class for name in (
+        'firefox', 'librewolf', 'waterfox', 'floorp', 'zen', 'icecat'))
+    return firefox_family and ('pictureinpicture' in role or 'pictureinpicture' in title)
+
+
 class WindowInfo:
     """Represents information about a window"""
 
@@ -760,8 +774,51 @@ class WindowManager:
             )
         }
         client_atom = monitor_display.get_atom('_NET_CLIENT_LIST')
+        role_atom = monitor_display.get_atom('WM_WINDOW_ROLE')
+        name_atom = monitor_display.get_atom('_NET_WM_NAME')
+        class_atom = monitor_display.get_atom('WM_CLASS')
+
+        def property_text(window, atom):
+            prop = window.get_full_property(atom, X.AnyPropertyType)
+            if prop is None or prop.value is None:
+                return ''
+            value = prop.value
+            if isinstance(value, bytes):
+                return value.decode('utf-8', errors='replace').replace('\0', ' ')
+            if hasattr(value, 'tobytes'):
+                return value.tobytes().decode('utf-8', errors='replace').replace('\0', ' ')
+            return str(value)
+
+        def is_pip(window):
+            return is_firefox_pip_identity(
+                property_text(window, role_atom),
+                property_text(window, name_atom),
+                property_text(window, class_atom))
+
+        def pip_under_pointer(pointer, clients):
+            """Locate PiP below pointer even when it is not the active window.
+
+            An XFCE decoration frame may be the direct child of root; the
+            actual EWMH client is a descendant of that frame.
+            """
+            child = pointer.child
+            if not child or child.id == X.NONE:
+                return None
+            queue = [child]
+            seen = set()
+            while queue and len(seen) < 128:
+                node = queue.pop(0)
+                if node.id in seen:
+                    continue
+                seen.add(node.id)
+                if node.id in clients and is_pip(node):
+                    return node.id
+                queue.extend(node.query_tree().children)
+            return None
+
         last_window = None
         last_geometry = None
+        drag_is_pip = False
         moving_window = None
         last_change = 0.0
         print('Monitoring active client window movements (X11 polling)...', flush=True)
@@ -775,19 +832,27 @@ class WindowManager:
                             on_move_end(moving_window, last_geometry[0], last_geometry[1])
                         last_window = None
                         last_geometry = None
+                        drag_is_pip = False
                         moving_window = None
-                        time.sleep(0.025)
-                        continue
-
-                    prop = root.get_full_property(active_atom, X.AnyPropertyType)
-                    window_id = int(prop.value[0]) if prop is not None and len(prop.value) else 0
-                    if not window_id:
                         time.sleep(0.025)
                         continue
 
                     # Only EWMH-managed clients may be snap targets.
                     clients_prop = root.get_full_property(client_atom, X.AnyPropertyType)
-                    if clients_prop is None or window_id not in clients_prop.value:
+                    if clients_prop is None:
+                        time.sleep(0.025)
+                        continue
+                    clients = set(map(int, clients_prop.value))
+                    prop = root.get_full_property(active_atom, X.AnyPropertyType)
+                    active_id = int(prop.value[0]) if prop is not None and len(prop.value) else 0
+
+                    # Prefer a PiP window actually under the dragged pointer.
+                    # Firefox PiP may be marked as a dialog and may not take
+                    # _NET_ACTIVE_WINDOW focus while being moved.
+                    pointer_pip = pip_under_pointer(pointer, clients) if not drag_is_pip else None
+                    window_id = (last_window if drag_is_pip and last_window in clients
+                                 else pointer_pip or active_id)
+                    if window_id not in clients:
                         time.sleep(0.025)
                         continue
 
@@ -798,8 +863,14 @@ class WindowManager:
                         continue
                     types = window.get_full_property(type_atom, X.AnyPropertyType)
                     if types is not None and any(t in rejected_types for t in types.value):
-                        time.sleep(0.025)
-                        continue
+                        # PiP is frequently DIALOG/UTILITY. Keep the explicit
+                        # exclusion of all other dialogs, docks and panels.
+                        window_types = set(map(int, types.value))
+                        pip_allowed = {monitor_display.get_atom('_NET_WM_WINDOW_TYPE_DIALOG'),
+                                       monitor_display.get_atom('_NET_WM_WINDOW_TYPE_UTILITY')}
+                        if not (is_pip(window) and window_types <= pip_allowed):
+                            time.sleep(0.025)
+                            continue
 
                     geom = window.get_geometry()
                     trans = window.translate_coords(root, 0, 0)
@@ -810,6 +881,9 @@ class WindowManager:
                         if moving_window is not None and last_geometry is not None and on_move_end:
                             on_move_end(moving_window, last_geometry[0], last_geometry[1])
                         last_window = window_id
+                        drag_is_pip = is_pip(window)
+                        if drag_is_pip:
+                            print(f'[X11] Tracking Firefox PiP client {window_id:#x}', flush=True)
                         last_geometry = current
                         moving_window = None
                     elif current[:2] != last_geometry[:2]:
